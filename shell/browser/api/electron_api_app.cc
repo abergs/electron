@@ -112,6 +112,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include "base/apple/scoped_cftyperef.h"
 #include "base/no_destructor.h"
+#include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
 #include "content/browser/mac_helpers.h"
 #include "device/fido/strings/grit/fido_strings.h"
@@ -120,6 +121,8 @@
 #include "shell/browser/webauthn/electron_authenticator_request_delegate.h"
 #include "shell/common/process_util.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "url/gurl.h"
+#include "url/origin.h"
 #endif
 
 #if BUILDFLAG(IS_LINUX)
@@ -1784,6 +1787,35 @@ void App::ConfigureWebAuthn(gin_helper::ErrorThrower thrower,
     platform_passkeys = platform_passkeys_value.As<v8::Boolean>()->Value();
   }
 
+  std::optional<std::vector<url::Origin>> trusted_origins;
+  v8::Local<v8::Value> trusted_origins_value;
+  if (options.Get("trustedOrigins", &trusted_origins_value) &&
+      !trusted_origins_value->IsNullOrUndefined()) {
+    std::vector<std::string> specs;
+    if (!gin::ConvertFromV8(args->isolate(), trusted_origins_value, &specs)) {
+      thrower.ThrowTypeError(
+          "configureWebAuthn: 'trustedOrigins' must be an array of strings");
+      return;
+    }
+    std::vector<url::Origin> origins;
+    for (const std::string& spec : specs) {
+      // Whole origins only, and never HTTP(S): web origins keep the standard
+      // checks.
+      const GURL url(spec);
+      url::Origin origin = url::Origin::Create(url);
+      if (!url.is_valid() || origin.opaque() || url.SchemeIsHTTPOrHTTPS() ||
+          url != origin.GetURL()) {
+        thrower.ThrowTypeError(
+            base::StrCat({"configureWebAuthn: '", spec,
+                          "' in 'trustedOrigins' is not an origin, or is an "
+                          "HTTP(S) origin"}));
+        return;
+      }
+      origins.push_back(std::move(origin));
+    }
+    trusted_origins = std::move(origins);
+  }
+
   gin_helper::Dictionary touch_id;
   if (options.Get("touchID", &touch_id)) {
     std::string keychain_access_group;
@@ -1824,6 +1856,11 @@ void App::ConfigureWebAuthn(gin_helper::ErrorThrower thrower,
   if (platform_passkeys.has_value()) {
     ElectronWebAuthenticationDelegate::SetPlatformPasskeysEnabled(
         *platform_passkeys);
+  }
+
+  if (trusted_origins.has_value()) {
+    ElectronWebAuthenticationDelegate::SetTrustedOrigins(
+        std::move(*trusted_origins));
   }
 }
 

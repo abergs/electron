@@ -5,6 +5,7 @@
 #include "shell/browser/webauthn/electron_authenticator_request_delegate.h"
 
 #if BUILDFLAG(IS_MAC)
+#include <algorithm>
 #include <utility>
 
 #include "base/base64.h"
@@ -64,6 +65,28 @@ void ElectronWebAuthenticationDelegate::SetPlatformPasskeysEnabled(
 // static
 bool ElectronWebAuthenticationDelegate::IsPlatformPasskeysEnabled() {
   return platform_passkeys_enabled();
+}
+
+// static
+std::vector<url::Origin>& ElectronWebAuthenticationDelegate::trusted_origins() {
+  static base::NoDestructor<std::vector<url::Origin>> value;
+  return *value;
+}
+
+// static
+void ElectronWebAuthenticationDelegate::SetTrustedOrigins(
+    std::vector<url::Origin> origins) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  trusted_origins() = std::move(origins);
+}
+
+bool ElectronWebAuthenticationDelegate::
+    OverrideCallerOriginAndRelyingPartyIdValidation(
+        content::BrowserContext* browser_context,
+        const url::Origin& caller_origin,
+        const std::string& relying_party_id) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  return std::ranges::contains(trusted_origins(), caller_origin);
 }
 
 std::optional<content::WebAuthenticationDelegate::TouchIdAuthenticatorConfig>
