@@ -36,7 +36,8 @@ class ElectronWebAuthenticationDelegate
   static bool IsPlatformPasskeysEnabled();
 
   // Configures the origins of the app's own pages (such as a custom protocol
-  // origin) that may claim any RP ID. Called from `app.configureWebAuthn()`.
+  // origin) that may claim any registrable RP ID. Called from
+  // `app.configureWebAuthn()`.
   static void SetTrustedOrigins(std::vector<url::Origin> origins);
 #endif
 
@@ -63,10 +64,11 @@ class ElectronWebAuthenticationDelegate
       content::RenderFrameHost* render_frame_host,
       base::OnceCallback<void(std::optional<bool>)> callback) override;
 
-  // A custom protocol origin has no domain, so the standard RP ID check (and
-  // the HTTP(S)-only origin check before it) rejects every RP ID. Skip both
-  // for the origins the app trusts. For platform passkeys, macOS still checks
-  // the RP ID against the app's associated domains.
+  // The standard checks accept only HTTP(S) origins, so they reject every RP
+  // ID that a custom protocol page claims. Skip them for the origins the app
+  // trusts, if the RP ID is a registrable domain or localhost. For platform
+  // passkeys, macOS still checks the RP ID against the app's associated
+  // domains.
   bool OverrideCallerOriginAndRelyingPartyIdValidation(
       content::BrowserContext* browser_context,
       const url::Origin& caller_origin,

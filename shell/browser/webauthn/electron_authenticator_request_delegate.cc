@@ -11,9 +11,12 @@
 #include "base/base64.h"
 #include "base/containers/span.h"
 #include "base/no_destructor.h"
+#include "base/strings/string_util.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_thread.h"
 #include "device/fido/mac/credential_metadata.h"
+#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+#include "net/base/url_util.h"
 #include "shell/browser/electron_browser_context.h"
 #include "shell/browser/webauthn/electron_platform_passkeys_authenticator.h"
 #include "shell/common/electron_constants.h"
@@ -86,7 +89,17 @@ bool ElectronWebAuthenticationDelegate::
         const url::Origin& caller_origin,
         const std::string& relying_party_id) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  return std::ranges::contains(trusted_origins(), caller_origin);
+  if (!std::ranges::contains(trusted_origins(), caller_origin)) {
+    return false;
+  }
+  // Same rule as Chrome applies to extension origins: no empty IDs and no
+  // public suffixes.
+  return net::registry_controlled_domains::HostHasRegistryControlledDomain(
+             base::TrimString(relying_party_id, ".",
+                              base::TrimPositions::TRIM_TRAILING),
+             net::registry_controlled_domains::INCLUDE_UNKNOWN_REGISTRIES,
+             net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES) ||
+         net::HostStringIsLocalhost(relying_party_id);
 }
 
 std::optional<content::WebAuthenticationDelegate::TouchIdAuthenticatorConfig>

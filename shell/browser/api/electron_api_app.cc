@@ -116,6 +116,7 @@
 #include "base/strings/utf_string_conversions.h"
 #include "content/browser/mac_helpers.h"
 #include "device/fido/strings/grit/fido_strings.h"
+#include "services/network/public/cpp/is_potentially_trustworthy.h"
 #include "shell/browser/electron_child_process_host_flags.h"
 #include "shell/browser/ui/cocoa/electron_bundle_mover.h"
 #include "shell/browser/webauthn/electron_authenticator_request_delegate.h"
@@ -1800,15 +1801,17 @@ void App::ConfigureWebAuthn(gin_helper::ErrorThrower thrower,
     std::vector<url::Origin> origins;
     for (const std::string& spec : specs) {
       // Whole origins only, and never HTTP(S): web origins keep the standard
-      // checks.
+      // checks. The origin must be secure, because the override skips the
+      // secure context check that WebAuthn relies on.
       const GURL url(spec);
       url::Origin origin = url::Origin::Create(url);
       if (!url.is_valid() || origin.opaque() || url.SchemeIsHTTPOrHTTPS() ||
-          url != origin.GetURL()) {
-        thrower.ThrowTypeError(
-            base::StrCat({"configureWebAuthn: '", spec,
-                          "' in 'trustedOrigins' is not an origin, or is an "
-                          "HTTP(S) origin"}));
+          url != origin.GetURL() ||
+          !network::IsOriginPotentiallyTrustworthy(origin)) {
+        thrower.ThrowTypeError(base::StrCat(
+            {"configureWebAuthn: '", spec,
+             "' in 'trustedOrigins' is not the origin of a secure custom "
+             "protocol"}));
         return;
       }
       origins.push_back(std::move(origin));

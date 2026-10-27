@@ -131,6 +131,11 @@ ifdescribe(process.platform === 'darwin')('app.configureWebAuthn', () => {
       expect(() => configureWebAuthn({ trustedOrigins: ['data:text/html,webauthn'] })).toThrow(/trustedOrigins/);
     });
 
+    it('throws for origins on a protocol that is not secure', () => {
+      // 'foo' is registered as standard but not secure in spec/index.js.
+      expect(() => configureWebAuthn({ trustedOrigins: ['foo://app'] })).toThrow(/trustedOrigins/);
+    });
+
     it('treats trustedOrigins: null and undefined as not set', () => {
       expect(() => configureWebAuthn({ trustedOrigins: undefined })).not.toThrow();
       expect(() => configureWebAuthn({ trustedOrigins: null })).not.toThrow();
@@ -220,6 +225,12 @@ ifdescribe(process.platform === 'darwin')('app.configureWebAuthn trustedOrigins'
     configureWebAuthn({ trustedOrigins: [appOrigin] });
     await loadWithVirtualAuthenticator(`${appOrigin}/`);
     expect(await createCredential('example.com')).toEqual({ ok: true });
+  });
+
+  it('rejects a public suffix as the relying party ID of a trusted origin', async () => {
+    configureWebAuthn({ trustedOrigins: [appOrigin] });
+    await loadWithVirtualAuthenticator(`${appOrigin}/`);
+    expect(await createCredential('com')).toEqual({ ok: false, name: 'SecurityError' });
   });
 
   it('rejects another origin on the same custom protocol', async () => {
