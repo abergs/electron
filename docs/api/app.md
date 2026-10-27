@@ -1473,7 +1473,8 @@ browser associated with the same domain. Platform passkeys cannot serve
 cross-origin (iframe) requests; those requests are left to the other available
 authenticators (Touch ID supports iframes) and a warning is logged to the
 DevTools console. The `prf` WebAuthn extension is supported on macOS 15 and
-later. The `largeBlob` extension is not currently supported by this
+later; on earlier versions, `prf` inputs are ignored. The `largeBlob` extension
+is not currently supported by this
 authenticator — a `create()` call with `largeBlob: { support: 'required' }`
 fails.
 
