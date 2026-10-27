@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session } from 'electron/main';
+import { app, BrowserWindow, protocol, session } from 'electron/main';
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
@@ -97,6 +97,152 @@ ifdescribe(process.platform === 'darwin')('app.configureWebAuthn', () => {
         })
       ).not.toThrow();
     });
+  });
+
+  describe('trustedOrigins', () => {
+    afterEach(() => {
+      // Reset the process-global list so it doesn't leak into later suites.
+      configureWebAuthn({ trustedOrigins: [] });
+    });
+
+    it('accepts an array of custom protocol origins', () => {
+      expect(() => configureWebAuthn({ trustedOrigins: [`${standardScheme}://app`] })).not.toThrow();
+    });
+
+    it('accepts an empty array', () => {
+      expect(() => configureWebAuthn({ trustedOrigins: [] })).not.toThrow();
+    });
+
+    it('throws when trustedOrigins is not an array of strings', () => {
+      expect(() => configureWebAuthn({ trustedOrigins: `${standardScheme}://app` })).toThrow(/trustedOrigins/);
+      expect(() => configureWebAuthn({ trustedOrigins: [42] })).toThrow(/trustedOrigins/);
+    });
+
+    it('throws for HTTP(S) origins', () => {
+      expect(() => configureWebAuthn({ trustedOrigins: ['https://example.com'] })).toThrow(/trustedOrigins/);
+      expect(() => configureWebAuthn({ trustedOrigins: ['http://localhost:8080'] })).toThrow(/trustedOrigins/);
+    });
+
+    it('throws for entries that are not an origin', () => {
+      expect(() => configureWebAuthn({ trustedOrigins: [''] })).toThrow(/trustedOrigins/);
+      expect(() => configureWebAuthn({ trustedOrigins: [`${standardScheme}://app/index.html`] })).toThrow(
+        /trustedOrigins/
+      );
+      expect(() => configureWebAuthn({ trustedOrigins: ['data:text/html,webauthn'] })).toThrow(/trustedOrigins/);
+    });
+
+    it('throws for origins on a protocol that is not secure', () => {
+      // 'foo' is registered as standard but not secure in spec/index.js.
+      expect(() => configureWebAuthn({ trustedOrigins: ['foo://app'] })).toThrow(/trustedOrigins/);
+    });
+
+    it('treats trustedOrigins: null and undefined as not set', () => {
+      expect(() => configureWebAuthn({ trustedOrigins: undefined })).not.toThrow();
+      expect(() => configureWebAuthn({ trustedOrigins: null })).not.toThrow();
+    });
+  });
+});
+
+ifdescribe(process.platform === 'darwin')('app.configureWebAuthn trustedOrigins', () => {
+  // App pages loaded from a custom protocol, which have no domain to check the
+  // relying party ID against.
+  const appOrigin = `${standardScheme}://app`;
+  let server: http.Server;
+  let serverUrl: string;
+  let w: BrowserWindow;
+
+  beforeAll(async () => {
+    protocol.handle(
+      standardScheme,
+      () => new Response('<!doctype html><title>webauthn</title>', { headers: { 'Content-Type': 'text/html' } })
+    );
+    server = http.createServer((req, res) => {
+      res.setHeader('Content-Type', 'text/html');
+      res.end('<!doctype html><title>webauthn</title>');
+    });
+    await new Promise<void>((resolve) => server.listen(0, 'localhost', resolve));
+    const { port } = server.address() as AddressInfo;
+    serverUrl = `http://localhost:${port}/`;
+  });
+
+  afterAll(() => {
+    protocol.unhandle(standardScheme);
+    server.close();
+  });
+
+  afterEach(async () => {
+    // Reset the process-global list so it doesn't leak into later suites.
+    configureWebAuthn({ trustedOrigins: [] });
+    try {
+      w.webContents.debugger.detach();
+    } catch {}
+    await closeAllWindows();
+  });
+
+  async function loadWithVirtualAuthenticator(url: string) {
+    w = new BrowserWindow({ show: false });
+    await w.loadURL(url);
+    w.webContents.debugger.attach();
+    await w.webContents.debugger.sendCommand('WebAuthn.enable');
+    await w.webContents.debugger.sendCommand('WebAuthn.addVirtualAuthenticator', {
+      options: {
+        protocol: 'ctap2',
+        transport: 'internal',
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true
+      }
+    });
+  }
+
+  function createCredential(rpId: string) {
+    return w.webContents.executeJavaScript(`
+      navigator.credentials.create({
+        publicKey: {
+          rp: { id: ${JSON.stringify(rpId)}, name: 'Electron Spec' },
+          user: {
+            id: new TextEncoder().encode('user-1'),
+            name: 'alice@example.com',
+            displayName: 'Alice'
+          },
+          challenge: new Uint8Array(32),
+          pubKeyCredParams: [{ type: 'public-key', alg: -7 }]
+        }
+      }).then(
+        () => ({ ok: true }),
+        e => ({ ok: false, name: e.name })
+      )
+    `);
+  }
+
+  it('rejects every relying party ID on a custom protocol page by default', async () => {
+    await loadWithVirtualAuthenticator(`${appOrigin}/`);
+    expect(await createCredential('example.com')).toEqual({ ok: false, name: 'SecurityError' });
+  });
+
+  it('lets a trusted origin claim a relying party ID', async () => {
+    configureWebAuthn({ trustedOrigins: [appOrigin] });
+    await loadWithVirtualAuthenticator(`${appOrigin}/`);
+    expect(await createCredential('example.com')).toEqual({ ok: true });
+  });
+
+  it('rejects a public suffix as the relying party ID of a trusted origin', async () => {
+    configureWebAuthn({ trustedOrigins: [appOrigin] });
+    await loadWithVirtualAuthenticator(`${appOrigin}/`);
+    expect(await createCredential('com')).toEqual({ ok: false, name: 'SecurityError' });
+  });
+
+  it('rejects another origin on the same custom protocol', async () => {
+    configureWebAuthn({ trustedOrigins: [appOrigin] });
+    await loadWithVirtualAuthenticator(`${standardScheme}://other/`);
+    expect(await createCredential('example.com')).toEqual({ ok: false, name: 'SecurityError' });
+  });
+
+  it('keeps the standard check for web origins', async () => {
+    configureWebAuthn({ trustedOrigins: [appOrigin] });
+    await loadWithVirtualAuthenticator(serverUrl);
+    expect(await createCredential('example.com')).toEqual({ ok: false, name: 'SecurityError' });
   });
 });
 

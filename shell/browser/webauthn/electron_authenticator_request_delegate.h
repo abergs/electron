@@ -7,9 +7,11 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "build/build_config.h"
 #include "content/public/browser/web_authentication_delegate.h"
+#include "url/origin.h"
 
 namespace electron {
 
@@ -32,6 +34,11 @@ class ElectronWebAuthenticationDelegate
   static bool IsTouchIdConfigured();
   static void SetPlatformPasskeysEnabled(bool enabled);
   static bool IsPlatformPasskeysEnabled();
+
+  // Configures the origins of the app's own pages (such as a custom protocol
+  // origin) that may claim any registrable RP ID. Called from
+  // `app.configureWebAuthn()`.
+  static void SetTrustedOrigins(std::vector<url::Origin> origins);
 #endif
 
   // content::WebAuthenticationDelegate
@@ -56,12 +63,23 @@ class ElectronWebAuthenticationDelegate
   void IsUserVerifyingPlatformAuthenticatorAvailableOverride(
       content::RenderFrameHost* render_frame_host,
       base::OnceCallback<void(std::optional<bool>)> callback) override;
+
+  // The standard checks accept only HTTP(S) origins, so they reject every RP
+  // ID that a custom protocol page claims. Skip them for the origins the app
+  // trusts, if the RP ID is a registrable domain or localhost. For platform
+  // passkeys, macOS still checks the RP ID against the app's associated
+  // domains.
+  bool OverrideCallerOriginAndRelyingPartyIdValidation(
+      content::BrowserContext* browser_context,
+      const url::Origin& caller_origin,
+      const std::string& relying_party_id) override;
 #endif
 
  private:
 #if BUILDFLAG(IS_MAC)
   static std::string& touch_id_keychain_access_group();
   static bool& platform_passkeys_enabled();
+  static std::vector<url::Origin>& trusted_origins();
 #endif
 };
 

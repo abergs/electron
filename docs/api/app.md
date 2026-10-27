@@ -1451,6 +1451,20 @@ added:
     etc.) and credentials sync across the user's devices. Defaults to `false`.
     Passing `null`/`undefined` (or omitting the key) leaves the previous
     setting unchanged.
+  * `trustedOrigins` string[] (optional) - Origins of the app's own pages, for
+    example `app://bundle`, that may claim any relying party ID that is a
+    registrable domain or `localhost`. The standard relying party ID check
+    accepts only HTTP(S) origins, so it rejects every ID that a custom protocol
+    page claims. Each entry must be an origin without a path, on a custom
+    protocol that is registered as `standard` and `secure` with
+    [`protocol.registerSchemesAsPrivileged()`](protocol.md#protocolregisterschemesasprivilegedcustomschemes).
+    All other origins keep the standard check. The list applies to all
+    [`session`](session.md) partitions, and an empty array clears it. For
+    platform passkeys, macOS still requires the relying party ID to be one of
+    the app's associated domains. For other authenticators, the `origin` in
+    `clientDataJSON` is the page's origin, so the relying party server must
+    accept it. Passing `null`/`undefined` (or omitting the key) leaves the
+    previous setting unchanged.
 
 Configures platform authenticators for the Web Authentication API
 (`navigator.credentials.create()` / `navigator.credentials.get()`). Until this
