@@ -1472,9 +1472,10 @@ shared across all [`session`](session.md) partitions and with any other app or
 browser associated with the same domain. Platform passkeys cannot serve
 cross-origin (iframe) requests; those requests are left to the other available
 authenticators (Touch ID supports iframes) and a warning is logged to the
-DevTools console. The `prf` and `largeBlob` WebAuthn extensions are not
-currently supported by this authenticator — `prf` inputs are ignored, and a
-`create()` call with `largeBlob: { support: 'required' }` fails.
+DevTools console. The `prf` WebAuthn extension is supported on macOS 15 and
+later. The `largeBlob` extension is not currently supported by this
+authenticator — a `create()` call with `largeBlob: { support: 'required' }`
+fails.
 
 ```js
 const { app } = require('electron')
