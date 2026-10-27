@@ -15,7 +15,9 @@
 #import <AuthenticationServices/AuthenticationServices.h>
 
 #include <algorithm>
+#include <optional>
 #include <utility>
+#include <vector>
 
 #include "base/base64url.h"
 #include "base/compiler_specific.h"
@@ -37,6 +39,7 @@
 #include "device/fido/ctap_get_assertion_request.h"
 #include "device/fido/ctap_make_credential_request.h"
 #include "device/fido/fido_request_handler_base.h"
+#include "device/fido/prf_input.h"
 #include "device/fido/public/fido_constants.h"
 #include "device/fido/public/fido_types.h"
 #include "device/fido/public/public_key_credential_descriptor.h"
@@ -154,7 +157,46 @@ device::AuthenticatorSupportedOptions BuildOptions() {
       device::AuthenticatorSupportedOptions::UserVerificationAvailability::
           kSupportedAndConfigured;
   options.supports_user_presence = true;
+  // Without this, Chromium drops the `prf` extension before dispatch.
+  if (@available(macOS 15.0, *)) {
+    options.supports_prf = true;
+  }
   return options;
+}
+
+// Apple takes the unhashed PRF inputs and hashes them itself, the same as
+// Chromium's device/fido/mac/icloud_keychain_sys.mm.
+API_AVAILABLE(macos(15.0))
+ASAuthorizationPublicKeyCredentialPRFAssertionInputValues* ToPRFInputValues(
+    const device::PRFInput& input) {
+  return [[ASAuthorizationPublicKeyCredentialPRFAssertionInputValues alloc]
+      initWithSaltInput1:VectorToNSData(input.input1)
+              saltInput2:input.input2 ? VectorToNSData(*input.input2) : nil];
+}
+
+// Chromium splits PRF results at 32 bytes and CHECKs the length, so a
+// malformed response from the credential provider must be rejected here.
+bool IsValidPRFOutput(const std::vector<uint8_t>& first,
+                      const std::vector<uint8_t>& second) {
+  constexpr size_t kPRFOutputSize = 32;
+  if (first.empty()) {
+    return second.empty();
+  }
+  return first.size() == kPRFOutputSize &&
+         (second.empty() || second.size() == kPRFOutputSize);
+}
+
+// Joins the PRF outputs into the layout Chromium expects: the first output,
+// then the second output if there is one. Returns nullopt if no PRF was
+// evaluated.
+std::optional<std::vector<uint8_t>> JoinPRFOutputs(
+    std::vector<uint8_t> first,
+    const std::vector<uint8_t>& second) {
+  if (first.empty()) {
+    return std::nullopt;
+  }
+  first.insert(first.end(), second.begin(), second.end());
+  return first;
 }
 
 // Validates that Apple's returned clientDataJSON contains the expected
@@ -306,6 +348,11 @@ struct ElectronPlatformPasskeysAuthenticator::ObjCStorage {
   // Apple's rawClientDataJSON, read from the public ASPublicKeyCredential
   // getter.
   std::vector<uint8_t> raw_client_data_json;
+  // Outputs of the `prf` extension (macOS 15+). An output is empty if the
+  // credential provider didn't evaluate it.
+  bool prf_enabled = false;
+  std::vector<uint8_t> prf_first;
+  std::vector<uint8_t> prf_second;
 
   // Expected values for validating Apple's returned clientDataJSON, checked in
   // OnXxxComplete before accepting raw_client_data_json as the override.
@@ -426,6 +473,19 @@ void ElectronPlatformPasskeysAuthenticator::MakeCredential(
       }
     }
 
+    // Chromium sets `prf` only when Options() reports supports_prf (macOS
+    // 15+). With inputs, Apple also evaluates the PRF during creation.
+    if (@available(macOS 15.0, *)) {
+      if (request.prf_input) {
+        as_request.prf =
+            [[ASAuthorizationPublicKeyCredentialPRFRegistrationInput alloc]
+                initWithInputValues:ToPRFInputValues(*request.prf_input)];
+      } else if (request.prf) {
+        as_request.prf = [ASAuthorizationPublicKeyCredentialPRFRegistrationInput
+            checkForSupport];
+      }
+    }
+
     objc_storage_->delegate = [[ElectronPlatformPasskeyDelegate alloc] init];
     objc_storage_->delegate.presentationAnchor = window;
 
@@ -449,6 +509,13 @@ void ElectronPlatformPasskeysAuthenticator::MakeCredential(
             NSDataToVector(registration.rawAttestationObject);
         storage->raw_client_data_json =
             NSDataToVector(registration.rawClientDataJSON);
+        if (@available(macOS 15.0, *)) {
+          if (registration.prf) {
+            storage->prf_enabled = registration.prf.isSupported;
+            storage->prf_first = NSDataToVector(registration.prf.first);
+            storage->prf_second = NSDataToVector(registration.prf.second);
+          }
+        }
       }
       weak_self->OnMakeCredentialComplete(std::move(moved_callback));
     };
@@ -538,6 +605,31 @@ void ElectronPlatformPasskeysAuthenticator::GetAssertion(
       as_request.allowedCredentials = descriptors;
     }
 
+    // An input without a credential ID applies to any credential that has no
+    // input of its own.
+    if (@available(macOS 15.0, *)) {
+      if (!request.prf_inputs.empty()) {
+        ASAuthorizationPublicKeyCredentialPRFAssertionInputValues*
+            default_values = nil;
+        NSMutableDictionary<
+            NSData*,
+            ASAuthorizationPublicKeyCredentialPRFAssertionInputValues*>*
+            per_credential_values = [NSMutableDictionary dictionary];
+        for (const device::PRFInput& input : request.prf_inputs) {
+          if (input.credential_id) {
+            per_credential_values[VectorToNSData(*input.credential_id)] =
+                ToPRFInputValues(input);
+          } else {
+            default_values = ToPRFInputValues(input);
+          }
+        }
+        as_request.prf =
+            [[ASAuthorizationPublicKeyCredentialPRFAssertionInput alloc]
+                     initWithInputValues:default_values
+                perCredentialInputValues:per_credential_values];
+      }
+    }
+
     objc_storage_->delegate = [[ElectronPlatformPasskeyDelegate alloc] init];
     objc_storage_->delegate.presentationAnchor = window;
 
@@ -563,6 +655,12 @@ void ElectronPlatformPasskeysAuthenticator::GetAssertion(
             storage->user_handle = NSDataToVector(assertion.userID);
             storage->raw_client_data_json =
                 NSDataToVector(assertion.rawClientDataJSON);
+            if (@available(macOS 15.0, *)) {
+              if (assertion.prf) {
+                storage->prf_first = NSDataToVector(assertion.prf.first);
+                storage->prf_second = NSDataToVector(assertion.prf.second);
+              }
+            }
           }
           weak_self->OnGetAssertionComplete(std::move(moved_callback));
         };
@@ -747,6 +845,15 @@ void ElectronPlatformPasskeysAuthenticator::OnMakeCredentialComplete(
   response.raw_client_data_json =
       std::move(objc_storage_->raw_client_data_json);
 
+  if (!IsValidPRFOutput(objc_storage_->prf_first, objc_storage_->prf_second)) {
+    LogInvalidResponse();
+    std::move(callback).Run(kMakeCredentialTerminalFailure, std::nullopt);
+    return;
+  }
+  response.prf_enabled = objc_storage_->prf_enabled;
+  response.prf_results = JoinPRFOutputs(std::move(objc_storage_->prf_first),
+                                        objc_storage_->prf_second);
+
   std::move(callback).Run(device::MakeCredentialStatus::kSuccess,
                           std::move(response));
 }
@@ -797,6 +904,14 @@ void ElectronPlatformPasskeysAuthenticator::OnGetAssertionComplete(
   }
   response.raw_client_data_json =
       std::move(objc_storage_->raw_client_data_json);
+
+  if (!IsValidPRFOutput(objc_storage_->prf_first, objc_storage_->prf_second)) {
+    LogInvalidResponse();
+    std::move(callback).Run(kGetAssertionTerminalFailure, {});
+    return;
+  }
+  response.hmac_secret = JoinPRFOutputs(std::move(objc_storage_->prf_first),
+                                        objc_storage_->prf_second);
 
   std::vector<device::AuthenticatorGetAssertionResponse> responses;
   responses.push_back(std::move(response));
